@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 房間預覽</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden; /* 隱藏滾動條 */
+            font-family: 'Inter', 'Noto Sans TC', sans-serif;
+            background-color: #f0f0f0;
+        }
+        canvas {
+            display: block; /* 移除 canvas 下方的額外空間 */
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            width: 100%;
+            text-align: center;
+            color: #333;
+            font-size: 16px;
+            background-color: rgba(255, 255, 255, 0.7);
+            padding: 8px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <div id="info">拖曳滑鼠以旋轉視角，滾動滑鼠滾輪以縮放，點擊並拖曳物品以移動它們</div>
+
+    <!-- 引入 Three.js 函式庫 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- 引入 OrbitControls (用於滑鼠控制視角) -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <!-- 引入 DragControls (用於拖曳物品) -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/DragControls.js"></script>
+
+    <script>
+        // 參考:
+        // BED: 左側
+        // WINDOW: 頂部
+        // PLANT: 右上角
+        // TABLE & CHAIRS: 右上
+        // RUG: 中間
+        // SHELF: 右側
+        // DOOR: 左下角
+
+        let scene, camera, renderer, controls, dragControls;
+        const draggableObjects = []; // 儲存可拖曳的物品
+        let roomWidth = 14;
+        let roomDepth = 18;
+        let wallHeight = 8;
+        let wallThickness = 0.5;
+
+        // --- 初始化函式 ---
+        function init() {
+            // 1. 建立場景
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xf0f0f0);
+
+            // 2. 建立相機
+            camera = new THREE.PerspectiveCamera(
+                75, // 視野角度
+                window.innerWidth / window.innerHeight, // 寬高比
+                0.1, // 近平面
+                1000 // 遠平面
+            );
+            // 將相機移出中心，以便觀察
+            camera.position.set(roomWidth * 0.5, 15, roomDepth * 0.8);
+
+            // 3. 建立渲染器
+            renderer = new THREE.WebGLRenderer({ antialias: true }); // 開啟抗鋸齒
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true; // 開啟陰影
+            document.body.appendChild(renderer.domElement);
+
+            // 4. 建立軌道控制器 (滑鼠操作)
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; // 開啟阻尼效果，使旋轉更平滑
+            controls.target.set(0, 0, 0); // 將控制器中心設置在場景原點
+
+            // 5. 建立光源
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6); // 環境光
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8); // 平行光
+            directionalLight.position.set(10, 15, 10);
+            directionalLight.castShadow = true; // 光源產生陰影
+            // 設定陰影範圍
+            directionalLight.shadow.camera.top = 20;
+            directionalLight.shadow.camera.bottom = -20;
+            directionalLight.shadow.camera.left = -20;
+            directionalLight.shadow.camera.right = 20;
+            scene.add(directionalLight);
+            
+            // --- 建立場景物件 ---
+            createRoom();
+            createFurniture(); // 這會填充 draggableObjects 陣列
+
+            // 6. 建立拖曳控制器
+            dragControls = new THREE.DragControls(draggableObjects, camera, renderer.domElement);
+
+            // 7. 處理控制器衝突
+            dragControls.addEventListener('dragstart', function (event) {
+                controls.enabled = false; // 拖曳時, 禁用攝影機控制
+            });
+            dragControls.addEventListener('dragend', function (event) {
+                controls.enabled = true; // 拖曳結束時, 啟用攝影機控制
+            });
+
+            // 8. 鎖定拖曳的 Y 軸, 讓物品保持在地板上
+            dragControls.addEventListener('drag', function (event) {
+                if (event.object.isRug) {
+                    event.object.position.y = 0.05; // 地毯保持在 0.05
+                } else {
+                    event.object.position.y = 0; // 其他物品保持在 0
+                }
+            });
+
+            // 9. 監聽視窗大小變化
+            window.addEventListener('resize', onWindowResize, false);
+
+            // 10. 開始動畫循環
+            animate();
+        }
+
+        // --- 建立房間 (地板與牆壁) ---
+        function createRoom() {
+            // 地板
+            const floorGeometry = new THREE.PlaneGeometry(roomWidth, roomDepth);
+            const floorMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0xeeeeee, 
+                side: THREE.DoubleSide 
+            });
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.rotation.x = -Math.PI / 2; // 旋轉使其平放
+            floor.receiveShadow = true; // 地板接收陰影
+            scene.add(floor);
+
+            // 牆壁材質
+            const wallMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0xfff8e1, // 米白色
+                side: THREE.DoubleSide
+            });
+
+            // 後牆 (有窗戶)
+            // 窗戶參數
+            const windowWidth = 6;
+            const windowHeight = 4;
+            const windowBottom = 3;
+
+            // 窗戶左側
+            const wallBackLeftGeo = new THREE.BoxGeometry((roomWidth - windowWidth) / 2, wallHeight, wallThickness);
+            const wallBackLeft = new THREE.Mesh(wallBackLeftGeo, wallMaterial);
+            wallBackLeft.position.set(- (windowWidth / 2 + (roomWidth - windowWidth) / 4), wallHeight / 2, -roomDepth / 2);
+            wallBackLeft.castShadow = true;
+            scene.add(wallBackLeft);
+
+            // 窗戶右側
+            const wallBackRightGeo = new THREE.BoxGeometry((roomWidth - windowWidth) / 2, wallHeight, wallThickness);
+            const wallBackRight = new THREE.Mesh(wallBackRightGeo, wallMaterial);
+            wallBackRight.position.set((windowWidth / 2 + (roomWidth - windowWidth) / 4), wallHeight / 2, -roomDepth / 2);
+            wallBackRight.castShadow = true;
+            scene.add(wallBackRight);
+            
+            // 窗戶下方
+            const wallBackBottomGeo = new THREE.BoxGeometry(windowWidth, windowBottom, wallThickness);
+            const wallBackBottom = new THREE.Mesh(wallBackBottomGeo, wallMaterial);
+            wallBackBottom.position.set(0, windowBottom / 2, -roomDepth / 2);
+            wallBackBottom.castShadow = true;
+            scene.add(wallBackBottom);
+
+            // 窗戶上方
+            const wallBackTopGeo = new THREE.BoxGeometry(windowWidth, wallHeight - windowHeight - windowBottom, wallThickness);
+            const wallBackTop = new THREE.Mesh(wallBackTopGeo, wallMaterial);
+            wallBackTop.position.set(0, windowHeight + windowBottom + (wallHeight - windowHeight - windowBottom) / 2, -roomDepth / 2);
+            wallBackTop.castShadow = true;
+            scene.add(wallBackTop);
+
+            // 窗戶本身 (半透明)
+            const windowGeo = new THREE.BoxGeometry(windowWidth, windowHeight, wallThickness * 0.5);
+            const windowMat = new THREE.MeshStandardMaterial({
+                color: 0x87ceeb, // 淡藍色
+                transparent: true,
+                opacity: 0.5
+            });
+            const windowMesh = new THREE.Mesh(windowGeo, windowMat);
+            windowMesh.position.set(0, windowBottom + windowHeight / 2, -roomDepth / 2);
+            scene.add(windowMesh);
+
+
+            // 左牆 (有門)
+            // 門參數
+            const doorWidth = 3;
+            const doorHeight = 6.5;
+            const doorPositionFromBack = 14; // 門離後牆的距離
+
+            // 門後方 (靠近後牆)
+            const wallLeftBackGeo = new THREE.BoxGeometry(roomDepth - doorPositionFromBack, wallHeight, wallThickness);
+            const wallLeftBack = new THREE.Mesh(wallLeftBackGeo, wallMaterial);
+            wallLeftBack.position.set(-roomWidth / 2, wallHeight / 2, -doorPositionFromBack / 2 + (roomDepth-doorPositionFromBack)/2);
+            wallLeftBack.rotation.y = Math.PI / 2;
+            wallLeftBack.castShadow = true;
+            scene.add(wallLeftBack);
+
+            // 門前方 (靠近前景)
+            const wallLeftFrontGeo = new THREE.BoxGeometry(doorPositionFromBack - doorWidth, wallHeight, wallThickness);
+            const wallLeftFront = new THREE.Mesh(wallLeftFrontGeo, wallMaterial);
+            wallLeftFront.position.set(-roomWidth / 2, wallHeight / 2, (roomDepth / 2) - (doorPositionFromBack - doorWidth) / 2);
+            wallLeftFront.rotation.y = Math.PI / 2;
+            wallLeftFront.castShadow = true;
+            scene.add(wallLeftFront);
+
+            // 門上方
+            const wallLeftTopGeo = new THREE.BoxGeometry(doorWidth, wallHeight - doorHeight, wallThickness);
+            const wallLeftTop = new THREE.Mesh(wallLeftTopGeo, wallMaterial);
+            wallLeftTop.position.set(-roomWidth / 2, doorHeight + (wallHeight - doorHeight) / 2, (roomDepth / 2) - doorPositionFromBack + doorWidth/2);
+            wallLeftTop.rotation.y = Math.PI / 2;
+            wallLeftTop.castShadow = true;
+            scene.add(wallLeftTop);
+
+            // 門 (開啟)
+            const doorGeo = new THREE.BoxGeometry(doorWidth, doorHeight, 0.2);
+            const doorMat = new THREE.MeshStandardMaterial({ color: 0x8B4513 }); // 棕色
+            const door = new THREE.Mesh(doorGeo, doorMat);
+            // 設置樞軸點並旋轉
+            door.position.set(-roomWidth / 2 + 0.1, doorHeight / 2, (roomDepth / 2) - doorPositionFromBack + doorWidth);
+            door.rotation.y = -Math.PI / 3; // 旋轉開啟
+            door.castShadow = true;
+            scene.add(door);
+
+
+            // 右牆
+            const wallRightGeo = new THREE.BoxGeometry(roomDepth, wallHeight, wallThickness);
+            const wallRight = new THREE.Mesh(wallRightGeo, wallMaterial);
+            wallRight.position.set(roomWidth / 2, wallHeight / 2, 0);
+            wallRight.rotation.y = Math.PI / 2;
+            wallRight.castShadow = true;
+            scene.add(wallRight);
+
+            // (前牆 - 為了方便觀看，暫時不加)
+            // const wallFrontGeo = new THREE.BoxGeometry(roomWidth, wallHeight, wallThickness);
+            // const wallFront = new THREE.Mesh(wallFrontGeo, wallMaterial);
+            // wallFront.position.set(0, wallHeight / 2, roomDepth / 2);
+            // scene.add(wallFront);
+        }
+
+        // --- 建立家具 ---
+        function createFurniture() {
+            // (移除了 furnitureGroup, 物品直接加入 scene 和 draggableObjects)
+            
+            // 共用材質
+            const woodMaterial = new THREE.MeshStandardMaterial({ color: 0xa0522d }); // 棕色木頭
+            const fabricMaterial = new THREE.MeshStandardMaterial({ color: 0x4682b4 }); // 藍色布料
+            const metalMaterial = new THREE.MeshStandardMaterial({ color: 0x808080 }); // 灰色金屬
+            
+            // 床 (Bed) - 原點在地板
+            const bedFrameGeo = new THREE.BoxGeometry(5, 2, 9);
+            const bedFrame = new THREE.Mesh(bedFrameGeo, woodMaterial);
+            bedFrame.position.y = 1; // 床架高度 2, 中心在 1
+            bedFrame.castShadow = true;
+            bedFrame.receiveShadow = true;
+
+            const mattressGeo = new THREE.BoxGeometry(5, 1, 9);
+            const mattress = new THREE.Mesh(mattressGeo, fabricMaterial);
+            mattress.position.y = 2.5; // 床墊高度 1, 放在 2 高的床架上 (2 + 0.5)
+            mattress.castShadow = true;
+            
+            const bed = new THREE.Group();
+            bed.add(bedFrame);
+            bed.add(mattress);
+            bed.position.set(-roomWidth / 2 + 2.5 + wallThickness, 0, -2); // Y 設為 0
+            scene.add(bed);
+            draggableObjects.push(bed);
+
+            // 地毯 (Rug)
+            const rugGeo = new THREE.BoxGeometry(5, 0.1, 6);
+            const rugMat = new THREE.MeshStandardMaterial({ color: 0xbdb76b }); // 暗卡其色
+            const rug = new THREE.Mesh(rugGeo, rugMat);
+            rug.position.set(0, 0.05, 4); // Y 設為 0.05
+            rug.receiveShadow = true;
+            rug.isRug = true; // 加入一個標記給 drag listener
+            scene.add(rug);
+            draggableObjects.push(rug);
+
+            // 書架 (Shelf) - 原點在地板
+            const shelfGeo = new THREE.BoxGeometry(3.5, 7, 1);
+            shelfGeo.translate(0, 3.5, 0); // 將幾何體原點移到物體底部
+            const shelf = new THREE.Mesh(shelfGeo, woodMaterial);
+            shelf.position.set(roomWidth / 2 - 1.75 - wallThickness, 0, 4); // Y 設為 0
+            shelf.castShadow = true;
+            scene.add(shelf);
+            draggableObjects.push(shelf);
+
+            // 桌子 (Table) - 原點在地板
+            const tableTopGeo = new THREE.BoxGeometry(5, 0.3, 3);
+            const tableTop = new THREE.Mesh(tableTopGeo, woodMaterial);
+            tableTop.position.set(0, 2.5, 0); // 桌面高度 2.5
+            tableTop.castShadow = true;
+
+            const tableLegGeo = new THREE.BoxGeometry(0.3, 2.5, 0.3); // 桌腳高度 2.5
+            tableLegGeo.translate(0, 1.25, 0); // 將幾何體原點移到桌腳底部
+            const leg1 = new THREE.Mesh(tableLegGeo, woodMaterial);
+            leg1.position.set(-2.2, 0, -1.2); // Y 設為 0
+            const leg2 = new THREE.Mesh(tableLegGeo, woodMaterial);
+            leg2.position.set(2.2, 0, -1.2); // Y 設為 0
+            const leg3 = new THREE.Mesh(tableLegGeo, woodMaterial);
+            leg3.position.set(-2.2, 0, 1.2); // Y 設為 0
+            const leg4 = new THREE.Mesh(tableLegGeo, woodMaterial);
+            leg4.position.set(2.2, 0, 1.2); // Y 設為 0
+
+            const table = new THREE.Group();
+            table.add(tableTop);
+            table.add(leg1);
+            table.add(leg2);
+            table.add(leg3);
+            table.add(leg4);
+            table.position.set(3, 0, -4.5); // Y 設為 0
+            scene.add(table);
+            draggableObjects.push(table);
+
+            // 椅子 (Chairs) - 原點在地板
+            const chairGeo = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+            chairGeo.translate(0, 0.75, 0); // 將幾何體原點移到物體底部
+            const chairMat = new THREE.MeshStandardMaterial({ color: 0x666666 });
+            
+            const chair1 = new THREE.Mesh(chairGeo, chairMat);
+            chair1.position.set(3, 0, -2.5); // Y 設為 0
+            chair1.castShadow = true;
+            scene.add(chair1);
+            draggableObjects.push(chair1);
+
+            const chair2 = new THREE.Mesh(chairGeo, chairMat);
+            chair2.position.set(3, 0, -6.5); // Y 設為 0
+            chair2.castShadow = true;
+            scene.add(chair2);
+            draggableObjects.push(chair2);
+
+            // 植物 (Plant) - 原點在地板
+            const potGeo = new THREE.CylinderGeometry(0.8, 0.8, 1, 16);
+            potGeo.translate(0, 0.5, 0); // 將幾何體原點移到物體底部
+            const potMat = new THREE.MeshStandardMaterial({ color: 0xcd853f }); // 陶土色
+            const pot = new THREE.Mesh(potGeo, potMat);
+            pot.position.y = 0; // Y 設為 0
+            pot.castShadow = true;
+
+            const plantGeo = new THREE.SphereGeometry(1, 16, 16);
+            const plantMat = new THREE.MeshStandardMaterial({ color: 0x228b22 }); // 綠色
+            const plant = new THREE.Mesh(plantGeo, plantMat);
+            plant.position.y = 2; // 放在高度 1 的盆栽上 (1 + 1)
+            plant.castShadow = true;
+
+            const plantGroup = new THREE.Group();
+            plantGroup.add(pot);
+            plantGroup.add(plant);
+            plantGroup.position.set(roomWidth / 2 - 1.5 - wallThickness, 0, -roomDepth/2 + 1.5 + wallThickness); // Y 設為 0
+            scene.add(plantGroup);
+            draggableObjects.push(plantGroup);
+        }
+
+        // --- 視窗大小調整 ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- 動畫循環 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 更新控制器
+            controls.update();
+
+            // 渲染場景
+            renderer.render(scene, camera);
+        }
+
+        // --- 啟動 ---
+        init();
+
+    </script>
+</body>
+</html>
